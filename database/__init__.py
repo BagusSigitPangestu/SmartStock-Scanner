@@ -1,0 +1,1 @@
+# SmartStock Scanner — Database Package
