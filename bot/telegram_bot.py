@@ -107,11 +107,15 @@ async def _run_scan(update: Update, trade_type: str):
                 None, run_screening, bulk_data, intraday_data, trade_type
             )
 
-            # Apply risk check to each result
+            # Apply risk check to each result and filter by RRR >= 2.0
+            valid_results = []
             for r in results:
                 ticker = r["ticker"]
                 if ticker in bulk_data:
                     apply_risk_check(r, bulk_data[ticker])
+                    if r.get("rrr", 0) >= 2.0:
+                        valid_results.append(r)
+            results = valid_results
 
             # Send summary header
             summary = format_scan_summary(results, trade_type)

@@ -18,6 +18,77 @@ from services.adimology_service import calculate_targets
 logger = logging.getLogger(__name__)
 
 
+def check_bsjp_criteria(df: pd.DataFrame) -> tuple[bool, str]:
+    """Filter logic for Day Trading (BSJP Momentum)"""
+    if df.empty or len(df) < 20:
+        return False, ""
+    
+    current = df.iloc[-1]
+    
+    # 1. Trend: Close > EMA5 AND EMA5 > EMA20 (MA20 in current code)
+    if pd.isna(current.get("EMA5")) or pd.isna(current.get("MA20")):
+        return False, ""
+    if not (current["Close"] > current["EMA5"] and current["EMA5"] > current["MA20"]):
+        return False, ""
+        
+    # 2. Strength: 55 <= RSI <= 72
+    rsi = current.get("RSI")
+    if pd.isna(rsi) or not (55 <= rsi <= 72):
+        return False, ""
+        
+    # 3. Volume: Vol_Ratio >= 1.5
+    vol_ratio = current.get("Vol_Ratio")
+    if pd.isna(vol_ratio) or vol_ratio < 1.5:
+        return False, ""
+        
+    # 4. Price Action: RC >= 0.8
+    rc = current.get("RC")
+    if pd.isna(rc) or rc < 0.8:
+        return False, ""
+        
+    return True, f"BSJP Momentum (RC: {rc:.2f}, Vol: {vol_ratio:.1f}x)"
+
+def check_swing_criteria(df: pd.DataFrame) -> tuple[bool, str]:
+    """Filter logic for Swing Trading (Trend Following)"""
+    if df.empty or len(df) < 50:
+        return False, ""
+        
+    current = df.iloc[-1]
+    prev = df.iloc[-2]
+    
+    # Setup A: Golden Cross (Trend Reversal)
+    # SMA20 memotong ke atas SMA50 dalam 3 hari terakhir AND Close > SMA20
+    setup_a = False
+    if pd.notna(current.get("MA20")) and pd.notna(current.get("SMA50")):
+        if current["Close"] > current["MA20"]:
+            cross_found = False
+            for i in range(1, 4):
+                if len(df) > i:
+                    curr_day = df.iloc[-i]
+                    prev_day = df.iloc[-(i+1)]
+                    if prev_day["MA20"] <= prev_day["SMA50"] and curr_day["MA20"] > curr_day["SMA50"]:
+                        cross_found = True
+                        break
+            setup_a = cross_found
+            
+    # Setup B: Momentum Shift (MACD)
+    # MACD_Line > Signal_Line AND Hist_today > Hist_yesterday AND Stoch %K < 40
+    setup_b = False
+    if (pd.notna(current.get("MACD_Line")) and pd.notna(current.get("MACD_Signal")) and 
+        pd.notna(current.get("MACD_Hist")) and pd.notna(prev.get("MACD_Hist")) and 
+        pd.notna(current.get("Stoch_K"))):
+        if (current["MACD_Line"] > current["MACD_Signal"] and 
+            current["MACD_Hist"] > prev["MACD_Hist"] and 
+            current["Stoch_K"] < 40):
+            setup_b = True
+            
+    if setup_a:
+        return True, "Swing: Golden Cross (SMA20x50)"
+    elif setup_b:
+        return True, "Swing: MACD Momentum Shift"
+        
+    return False, ""
+
 def score_stock(
     ticker: str,
     df: pd.DataFrame,
@@ -39,6 +110,18 @@ def score_stock(
 
     # --- Layer B: Technical Indicators (0-30) ---
     df = compute_indicators(df)
+    
+    # --- PRD2 Hard Filter ---
+    setup_name = "Ensemble Basic"
+    if trade_type in [config.TRADE_TYPE_BSJP, config.TRADE_TYPE_DAY]:
+        passed, setup_name = check_bsjp_criteria(df)
+        if not passed:
+            return None
+    elif trade_type == config.TRADE_TYPE_SWING:
+        passed, setup_name = check_swing_criteria(df)
+        if not passed:
+            return None
+
     vwap = compute_vwap(df_intraday) if df_intraday is not None else None
     indicator_result = score_indicators(df, vwap=vwap)
 
@@ -118,6 +201,7 @@ def score_stock(
         "volume": volume_result,
         "vwap": vwap,
         "adimology": adimology,
+        "setup_name": setup_name,
     }
 
 

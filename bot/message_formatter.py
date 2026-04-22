@@ -47,6 +47,9 @@ def format_signal_message(result: dict) -> str:
     filled = int(score / 10)
     bar = "█" * filled + "░" * (10 - filled)
 
+    # Setup Logic
+    setup_name = result.get("setup_name", "Unknown Setup")
+    
     msg = (
         f"📊 <b>SHORT-TERM ALERT: {ticker}</b>\n"
         f"\n"
@@ -55,8 +58,8 @@ def format_signal_message(result: dict) -> str:
         f"[{bar}]\n"
         f"\n"
         f"💹 <b>Strategi:</b>\n"
+        f"    ├ Setup: <b>{setup_name}</b>\n"
         f"    ├ Kalman: {kalman_trend}\n"
-        f"    ├ MA: {ma_status}\n"
         f"    ├ {rsi_str}\n"
         f"    └ Vol: {vol_label}\n"
     )

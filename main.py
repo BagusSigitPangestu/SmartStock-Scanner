@@ -82,10 +82,14 @@ async def setup_scheduler(app: Application):
                 None, run_screening, bulk_data, intraday_data, trade_type
             )
 
+            valid_results = []
             for r in results:
                 ticker = r["ticker"]
                 if ticker in bulk_data:
                     apply_risk_check(r, bulk_data[ticker])
+                    if r.get("rrr", 0) >= 2.0:
+                        valid_results.append(r)
+            results = valid_results
 
             if results:
                 summary = format_scan_summary(results, trade_type)

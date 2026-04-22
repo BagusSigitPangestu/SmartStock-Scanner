@@ -38,6 +38,45 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["BB_Upper"] = df["BB_Middle"] + config.BB_STD * bb_std
     df["BB_Lower"] = df["BB_Middle"] - config.BB_STD * bb_std
 
+    # --- New Indicators for BSJP & Swing (PRD2) ---
+    # EMA 5
+    df["EMA5"] = df["Close"].ewm(span=5, adjust=False).mean()
+    
+    # SMA 50
+    if len(df) >= 50:
+        df["SMA50"] = df["Close"].rolling(window=50).mean()
+    else:
+        df["SMA50"] = np.nan
+
+    # Volume Ratio
+    df["Vol_SMA20"] = df["Volume"].rolling(window=20).mean()
+    df["Vol_Ratio"] = df["Volume"] / df["Vol_SMA20"]
+
+    # Relative Close (RC)
+    high_low_diff = df["High"] - df["Low"]
+    df["RC"] = np.where(high_low_diff > 0, (df["Close"] - df["Low"]) / high_low_diff, 0)
+
+    # MACD (12, 26, 9)
+    exp12 = df["Close"].ewm(span=12, adjust=False).mean()
+    exp26 = df["Close"].ewm(span=26, adjust=False).mean()
+    df["MACD_Line"] = exp12 - exp26
+    df["MACD_Signal"] = df["MACD_Line"].ewm(span=9, adjust=False).mean()
+    df["MACD_Hist"] = df["MACD_Line"] - df["MACD_Signal"]
+
+    # Stochastic Oscillator (14, 3, 3)
+    # Standard %K is (Close - Low14) / (High14 - Low14) * 100
+    # PRD specifies (14, 3, 3) which means %K is 3-period SMA of raw %K, and %D is 3-period SMA of %K.
+    # We'll just calculate standard %K and smooth it.
+    if len(df) >= 14:
+        low_14 = df["Low"].rolling(window=14).min()
+        high_14 = df["High"].rolling(window=14).max()
+        raw_k = 100 * (df["Close"] - low_14) / (high_14 - low_14)
+        df["Stoch_K"] = raw_k.rolling(window=3).mean()  # 3-period smooth for %K
+        df["Stoch_D"] = df["Stoch_K"].rolling(window=3).mean() # 3-period smooth for %D
+    else:
+        df["Stoch_K"] = np.nan
+        df["Stoch_D"] = np.nan
+
     return df
 
 
