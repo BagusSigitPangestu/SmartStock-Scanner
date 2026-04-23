@@ -8,6 +8,7 @@ Runs the Telegram bot with APScheduler for automated scanning.
 import os
 import sys
 import logging
+import asyncio
 from datetime import datetime
 
 from dotenv import load_dotenv
