@@ -4,6 +4,7 @@ Builds HTML-formatted alert messages matching the PRD template.
 """
 
 import config
+from services.broker_service import format_broker_summary_message
 
 
 def format_signal_message(result: dict) -> str:
@@ -87,6 +88,11 @@ def format_signal_message(result: dict) -> str:
 
     if risk_warn:
         msg += f"\n{risk_warn}\n"
+
+    # Add broker summary from Deep Scan if available
+    broker_data = result.get("broker_summary")
+    if broker_data:
+        msg += f"\n{format_broker_summary_message(ticker, broker_data)}\n"
 
     return msg
 

@@ -7,7 +7,7 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 
-from telegram import Update, ReplyKeyboardMarkup
+from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
 import config
@@ -16,6 +16,8 @@ from services.scoring_service import run_screening
 from services.ticker_service import get_all_tickers, refresh_tickers
 from risk.risk_manager import apply_risk_check
 from bot.message_formatter import format_signal_message, format_scan_summary
+from services.broker_service import fetch_broker_summary, format_broker_summary_message, is_stock_fca_or_x
+from services.goapi_quota import get_status as get_quota_status
 from database.db import get_session
 from database.models import Signal, Analysis
 from export.excel_export import export_signals_to_excel
@@ -61,8 +63,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await cmd_refresh(update, context)
     elif text == "📊 Status":
         await cmd_status(update, context)
+    elif text.startswith("/broker ") or text.upper().startswith("BROKER "):
+        await cmd_broker(update, context, text.split(" ")[1])
     else:
-        await update.message.reply_text("Silakan gunakan tombol menu yang tersedia di bawah layar Anda.")
+        await update.message.reply_text("Silakan gunakan tombol menu yang tersedia di bawah layar Anda. Atau ketik '/broker <ticker>' untuk cek bandarmologi.")
 
 
 async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -107,14 +111,33 @@ async def _run_scan(update: Update, trade_type: str):
                 None, run_screening, bulk_data, intraday_data, trade_type
             )
 
-            # Apply risk check to each result and filter by RRR >= 2.0
-            valid_results = []
+            # Apply risk check to each result and filter by RRR >= 2.0 (no API calls)
+            rrr_passed = []
             for r in results:
                 ticker = r["ticker"]
                 if ticker in bulk_data:
                     apply_risk_check(r, bulk_data[ticker])
                     if r.get("rrr", 0) >= 2.0:
-                        valid_results.append(r)
+                        rrr_passed.append(r)
+
+            # FCA/X check for top 5 only (quota-aware)
+            valid_results = []
+            for r in rrr_passed[:5]:
+                ticker = r["ticker"]
+                is_fca = await loop.run_in_executor(None, is_stock_fca_or_x, ticker)
+                if is_fca:
+                    logger.info(f"Skipping {ticker} due to X notation or FCA.")
+                    continue
+                valid_results.append(r)
+
+            # Deep scan (Broker Summary) only for top 3 — conserve quota
+            quota = get_quota_status()
+            logger.info(f"GoAPI quota: {quota['used']}/{quota['limit']} used, {quota['remaining']} remaining.")
+            for r in valid_results[:3]:
+                ticker = r["ticker"]
+                broker_data = await loop.run_in_executor(None, fetch_broker_summary, ticker)
+                r["broker_summary"] = broker_data
+
             results = valid_results
 
             # Send summary header
@@ -124,7 +147,10 @@ async def _run_scan(update: Update, trade_type: str):
             # Send individual signals (max 10 to avoid spam)
             for r in results[:10]:
                 msg = format_signal_message(r)
-                await update.message.reply_text(msg, parse_mode="HTML")
+                ticker = r["ticker"]
+                keyboard = [[InlineKeyboardButton(f"🕵️ Cek Bandar {ticker}", callback_data=f"broker_{ticker}")]]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                await update.message.reply_text(msg, parse_mode="HTML", reply_markup=reply_markup)
                 await asyncio.sleep(0.3)  # Rate limit
 
             # Save to database
@@ -213,6 +239,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total_analysis = session.query(Analysis).count()
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         ticker_count = len(get_all_tickers())
+        quota = get_quota_status()
 
         msg = (
             "📡 <b>System Status</b>\n"
@@ -223,6 +250,8 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🎯 Tickers Monitored: {ticker_count}\n"
             f"⚙️ Threshold: Day={config.THRESHOLD_DAY_TRADING} | BSJP={config.THRESHOLD_BSJP} | Swing={config.THRESHOLD_SWING}\n"
             f"🛡️ Risk Limit: {config.MAX_RISK_PERCENT}%\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🔌 GoAPI Quota: {quota['used']}/{quota['limit']} digunakan, sisa {quota['remaining']} (reset besok)\n"
         )
         await update.message.reply_text(msg, parse_mode="HTML")
     finally:
@@ -239,4 +268,51 @@ async def cmd_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Refresh error: {e}")
         await update.message.reply_text(f"❌ Error: {e}")
+
+
+async def cmd_broker(update: Update, context: ContextTypes.DEFAULT_TYPE, ticker: str = None):
+    """Handle on-demand broker summary fetch."""
+    if not ticker:
+        if context.args:
+            ticker = context.args[0]
+        else:
+            await update.message.reply_text("Silakan masukkan kode saham. Contoh: /broker ASII")
+            return
+
+    await update.message.reply_text(f"🔍 Mengambil data Broker Summary untuk {ticker.upper()} via GoAPI...")
+    
+    try:
+        loop = asyncio.get_event_loop()
+        summary_data = await loop.run_in_executor(None, fetch_broker_summary, ticker)
+        
+        msg = format_broker_summary_message(ticker.upper(), summary_data)
+        await update.message.reply_text(msg, parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Broker command error: {e}")
+        await update.message.reply_text(f"❌ Error mengambil data: {e}")
+
+
+async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle inline keyboard button presses."""
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data
+    if data.startswith("broker_"):
+        ticker = data.split("_")[1]
+        
+        # Send loading message
+        loading_msg = await query.message.reply_text(f"🔍 Mengambil data Broker Summary untuk {ticker.upper()} via GoAPI...")
+        
+        try:
+            loop = asyncio.get_event_loop()
+            summary_data = await loop.run_in_executor(None, fetch_broker_summary, ticker)
+            
+            msg = format_broker_summary_message(ticker.upper(), summary_data)
+            
+            # Edit the loading message with the result
+            await loading_msg.edit_text(msg, parse_mode="HTML")
+        except Exception as e:
+            logger.error(f"Broker callback error: {e}")
+            await loading_msg.edit_text(f"❌ Error mengambil data: {e}")
 

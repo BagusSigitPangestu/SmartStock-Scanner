@@ -12,13 +12,14 @@ import asyncio
 from datetime import datetime
 
 from dotenv import load_dotenv
-from telegram.ext import Application, CommandHandler, MessageHandler, filters
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters
 
 import config
 from database.db import init_db
 from bot.telegram_bot import (
     cmd_start, cmd_scan, cmd_scan_day, cmd_scan_bsjp,
-    cmd_export, cmd_status, cmd_refresh, handle_message
+    cmd_export, cmd_status, cmd_refresh, cmd_broker, handle_message,
+    handle_callback_query
 )
 
 # ──────────────────────────────────────────────
@@ -67,6 +68,8 @@ async def setup_scheduler(app: Application):
             from risk.risk_manager import apply_risk_check
             from bot.message_formatter import format_signal_message, format_scan_summary
             from bot.telegram_bot import _save_results_to_db
+            from services.broker_service import fetch_broker_summary, is_stock_fca_or_x
+            from services.goapi_quota import get_status as get_quota_status
 
             loop = asyncio.get_event_loop()
             bulk_data = await loop.run_in_executor(None, fetch_bulk_data)
@@ -83,13 +86,33 @@ async def setup_scheduler(app: Application):
                 None, run_screening, bulk_data, intraday_data, trade_type
             )
 
-            valid_results = []
+            # Step 1: Apply risk check & RRR filter (no API calls)
+            rrr_passed = []
             for r in results:
                 ticker = r["ticker"]
                 if ticker in bulk_data:
                     apply_risk_check(r, bulk_data[ticker])
                     if r.get("rrr", 0) >= 2.0:
-                        valid_results.append(r)
+                        rrr_passed.append(r)
+
+            # Step 2: FCA/X check only for top 5 (quota-aware)
+            valid_results = []
+            for r in rrr_passed[:5]:
+                ticker = r["ticker"]
+                is_fca = await loop.run_in_executor(None, is_stock_fca_or_x, ticker)
+                if is_fca:
+                    logger.info(f"Scheduled Scan: Skipping {ticker} due to X notation or FCA.")
+                    continue
+                valid_results.append(r)
+
+            # Step 3: Deep scan (Broker Summary) only for top 3 — conserve quota
+            quota = get_quota_status()
+            logger.info(f"GoAPI quota sebelum deep scan: {quota['used']}/{quota['limit']} used, {quota['remaining']} remaining.")
+            for r in valid_results[:3]:
+                ticker = r["ticker"]
+                broker_data = await loop.run_in_executor(None, fetch_broker_summary, ticker)
+                r["broker_summary"] = broker_data
+
             results = valid_results
 
             if results:
@@ -100,8 +123,13 @@ async def setup_scheduler(app: Application):
 
                 for r in results[:10]:
                     msg = format_signal_message(r)
+                    ticker = r["ticker"]
+                    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+                    keyboard = [[InlineKeyboardButton(f"🕵️ Cek Bandar {ticker}", callback_data=f"broker_{ticker}")]]
+                    reply_markup = InlineKeyboardMarkup(keyboard)
+                    
                     await app.bot.send_message(
-                        chat_id=chat_id, text=msg, parse_mode="HTML"
+                        chat_id=chat_id, text=msg, parse_mode="HTML", reply_markup=reply_markup
                     )
                     await asyncio.sleep(0.3)
 
@@ -158,6 +186,10 @@ def main():
     app.add_handler(CommandHandler("export", cmd_export))
     app.add_handler(CommandHandler("refresh", cmd_refresh))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("broker", cmd_broker))
+
+    # Callback Query handler for inline buttons
+    app.add_handler(CallbackQueryHandler(handle_callback_query))
 
     # Text message handler for custom keyboard
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
