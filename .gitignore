@@ -1,9 +1,12 @@
 /.env
 /.env.example
 /PRD.md
+/PRD2.md
 /__pycache__
+**/__pycache__/
 /acuan
 /cache
+/exports/
 /smartstock.db
 /smartstock.log
 /venv
